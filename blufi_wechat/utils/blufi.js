@@ -355,11 +355,8 @@ class BluFiProtocol {
       
       const rssiValue = rssi > 127 ? rssi - 256 : -rssi
       
-      // 将字节数组转换为字符串
-      let ssid = ''
-      for (let i = 0; i < ssidBytes.length; i++) {
-        ssid += String.fromCharCode(ssidBytes[i])
-      }
+      // 统一走 UTF-8 解码，避免中文热点名在小程序里显示乱码
+      const ssid = this.bytesToString(ssidBytes)
       
       console.log(`✓ SSID: "${ssid}", RSSI: ${rssiValue}dBm, 新offset=${offset}`)
       
@@ -695,18 +692,78 @@ class BluFiProtocol {
 
   // 字符串转字节数组
   stringToBytes(str) {
+    /**
+     * 小程序需要把字符串按 UTF-8 编码成字节流再发给设备。
+     *
+     * 原来的 charCodeAt 只是把 UTF-16 码元直接截成单字节，
+     * 遇到中文 SSID/密码时会把数据发错，设备端也无法正确识别。
+     */
     const bytes = []
     for (let i = 0; i < str.length; i++) {
-      bytes.push(str.charCodeAt(i))
+      let codePoint = str.codePointAt(i)
+
+      // 代理对字符占两个 UTF-16 码元，需要额外跳过一次
+      if (codePoint > 0xFFFF) {
+        i++
+      }
+
+      if (codePoint <= 0x7F) {
+        bytes.push(codePoint)
+      } else if (codePoint <= 0x7FF) {
+        bytes.push(0xC0 | (codePoint >> 6))
+        bytes.push(0x80 | (codePoint & 0x3F))
+      } else if (codePoint <= 0xFFFF) {
+        bytes.push(0xE0 | (codePoint >> 12))
+        bytes.push(0x80 | ((codePoint >> 6) & 0x3F))
+        bytes.push(0x80 | (codePoint & 0x3F))
+      } else {
+        bytes.push(0xF0 | (codePoint >> 18))
+        bytes.push(0x80 | ((codePoint >> 12) & 0x3F))
+        bytes.push(0x80 | ((codePoint >> 6) & 0x3F))
+        bytes.push(0x80 | (codePoint & 0x3F))
+      }
     }
     return bytes
   }
 
   // 字节数组转字符串
   bytesToString(bytes) {
+    /**
+     * 按 UTF-8 解码小程序收到的字节流。
+     *
+      * Wi-Fi SSID 往往会包含中文或其他多字节字符，如果按单字节
+      * fromCharCode 直接拼接，就会稳定出现乱码。
+     */
     let str = ''
     for (let i = 0; i < bytes.length; i++) {
-      str += String.fromCharCode(bytes[i])
+      const byte1 = bytes[i]
+
+      if (byte1 < 0x80) {
+        str += String.fromCharCode(byte1)
+      } else if ((byte1 & 0xE0) === 0xC0 && i + 1 < bytes.length) {
+        const byte2 = bytes[++i]
+        const codePoint = ((byte1 & 0x1F) << 6) | (byte2 & 0x3F)
+        str += String.fromCharCode(codePoint)
+      } else if ((byte1 & 0xF0) === 0xE0 && i + 2 < bytes.length) {
+        const byte2 = bytes[++i]
+        const byte3 = bytes[++i]
+        const codePoint = ((byte1 & 0x0F) << 12) |
+          ((byte2 & 0x3F) << 6) |
+          (byte3 & 0x3F)
+        str += String.fromCharCode(codePoint)
+      } else if ((byte1 & 0xF8) === 0xF0 && i + 3 < bytes.length) {
+        const byte2 = bytes[++i]
+        const byte3 = bytes[++i]
+        const byte4 = bytes[++i]
+        const codePoint = ((byte1 & 0x07) << 18) |
+          ((byte2 & 0x3F) << 12) |
+          ((byte3 & 0x3F) << 6) |
+          (byte4 & 0x3F)
+        str += String.fromCodePoint(codePoint)
+      } else {
+        // 遇到非法字节时使用替代字符，避免整段字符串解码中断
+        str += '\uFFFD'
+      }
     }
     return str
   }
